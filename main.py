@@ -1,228 +1,112 @@
-import boto3
+import os
+import logging
 from datetime import datetime
-import dateutil.tz
-import json
-import ast
 
-BUILD_VERSION = '@@buildversion'
-AWS_REGION = '@@deploymentregion'
-AWS_EMAIL_REGION = '@@emailregion'
-SERVICE_ACCOUNT_NAME = '@@serviceaccount'
-EMAIL_TO_ADMIN = '@@emailreportto'
-EMAIL_FROM = '@@emailreportfrom'
-EMAIL_SEND_COMPLETION_REPORT = ast.literal_eval('@@emailsendcompletionreport')
-GROUP_LIST = "@@exclusiongroup"
+import boto3
 
-# Length of mask over the IAM Access Key
-MASK_ACCESS_KEY_LENGTH = ast.literal_eval('@@maskaccesskeylength')
+log = logging.getLogger()
+log.setLevel(logging.INFO)
 
-# First email warning
-FIRST_WARNING_NUM_DAYS = @@first_warning_num_days
-FIRST_WARNING_MESSAGE = '@@first_warning_message'
-# Last email warning
-LAST_WARNING_NUM_DAYS = @@last_warning_num_days
-LAST_WARNING_MESSAGE = '@@last_warning_message'
 
-# Max AGE days of key after which it is considered EXPIRED (deactivated)
-KEY_MAX_AGE_IN_DAYS = @@key_max_age_in_days
-KEY_EXPIRED_MESSAGE = '@@key_expired_message'
-
-KEY_YOUNG_MESSAGE = '@@key_young_message'
-
-# ==========================================================
-
-# Character length of an IAM Access Key
-ACCESS_KEY_LENGTH = 20
-KEY_STATE_ACTIVE = "Active"
-KEY_STATE_INACTIVE = "Inactive"
-
-# ==========================================================
-
-#check to see if the MASK_ACCESS_KEY_LENGTH has been misconfigured
-if MASK_ACCESS_KEY_LENGTH > ACCESS_KEY_LENGTH:
-    MASK_ACCESS_KEY_LENGTH = 16
-
-# ==========================================================
-def tzutc():
-    return dateutil.tz.tzutc()
+def notify(body, subject):
+    client = boto3.client('sns')
+    r = client.publish(
+        TopicArn=os.getenv('SNS_TOPIC_ARN'),
+        Message=body,
+        Subject=subject
+    )
+    log.info('SNS notified with MessageId %s', r['MessageId'])
 
 
 def key_age(key_created_date):
     tz_info = key_created_date.tzinfo
     age = datetime.now(tz_info) - key_created_date
-
-    print 'key age %s' % age
+    log.info('key age %s', age)
 
     key_age_str = str(age)
     if 'days' not in key_age_str:
         return 0
 
-    days = int(key_age_str.split(',')[0].split(' ')[0])
-
-    return days
+    return int(key_age_str.split(',')[0].split(' ')[0])
 
 
-def send_deactivate_email(email_to, username, age, access_key_id):
-    client = boto3.client('ses', region_name=AWS_EMAIL_REGION)
-    data = 'The Access Key [%s] belonging to User [%s] has been automatically ' \
-           'deactivated due to it being %s days old' % (access_key_id, username, age)
-    response = client.send_email(
-        Source=EMAIL_FROM,
-        Destination={
-            'ToAddresses': [email_to]
-        },
-        Message={
-            'Subject': {
-                'Data': 'AWS IAM Access Key Rotation - Deactivation of Access Key: %s' % access_key_id
-            },
-            'Body': {
-                'Text': {
-                    'Data': data
-                }
-            }
-        })
+def is_access_key_ever_used(client, access_key):
+    x = client.get_access_key_last_used(AccessKeyId=access_key)
+    if 'LastUsedDate' in x['AccessKeyLastUsed'].keys():
+        log.info('Access key %s has been used', access_key)
+        return True
+    else:
+        log.info('Access key %s has never been used', access_key)
+        return False
 
 
-def send_completion_email(email_to, finished, deactivated_report):
-    client = boto3.client('ses', region_name=AWS_EMAIL_REGION)
-    data = 'AWS IAM Access Key Rotation Lambda Function (cron job) finished successfully at %s \n \n ' \
-           'Deactivation Report:\n%s' % (finished, json.dumps(deactivated_report, indent=4, sort_keys=True))
-    response = client.send_email(
-        Source=EMAIL_FROM,
-        Destination={
-            'ToAddresses': [email_to]
-        },
-        Message={
-            'Subject': {
-                'Data': 'AWS IAM Access Key Rotation - Lambda Function'
-            },
-            'Body': {
-                'Text': {
-                    'Data': data
-                }
-            }
-        })
-
-
-def mask_access_key(access_key):
-    return access_key[-(ACCESS_KEY_LENGTH-MASK_ACCESS_KEY_LENGTH):].rjust(len(access_key), "*")
+def get_owner_email(client, username):
+    meta = client.list_user_tags(UserName=username)['Tags']
+    for i in meta:
+        if i['Key'] == 'Owner':
+            log.info('Email for user %s is %s', username, i['Value'])
+            return i['Value']
 
 
 def lambda_handler(event, context):
-    print '*****************************'
-    print 'RotateAccessKey (%s): starting...' % BUILD_VERSION
-    print '*****************************'
-    # Connect to AWS APIs
+    log.info('RotateAccessKey: starting...')
+    EXPIRE_OLD_ACCESS_KEY_AFTER = 30
+    DELETE_OLD_ACCESS_KEY_AFTER = 60
+    CREATE_NEW_ACCESS_KEY_AFTER = 90
+    NEW_ACCESS_KEY_NOTIFY_WINDOW = [14, 21]
     client = boto3.client('iam')
 
-    users = {}
     data = client.list_users()
-    print data
-
-    userindex = 0
+    log.info(data)
 
     for user in data['Users']:
-        userid = user['UserId']
         username = user['UserName']
-        users[userid] = username
-
-    users_report1 = []
-    users_report2 = []
-
-    for user in users:
-        userindex += 1
-        user_keys = []
-
-        print '---------------------'
-        print 'userindex %s' % userindex
-        print 'user %s' % user
-        username = users[user]
-        print 'username %s' % username
-
-        # test is a user belongs to a specific list of groups. If they do, do not invalidate the access key
-        print "Test if the user belongs to the exclusion group"
-        user_groups = client.list_groups_for_user(UserName=username)
-        skip = False
-        for groupName in user_groups['Groups']:
-            if groupName['GroupName'] == GROUP_LIST:
-                print 'Detected that user belongs to ', GROUP_LIST
-                skip = True
-                continue
-
-        if skip:
-            print "Do invalidate Access Key"
-            continue
-
-
-        # check to see if the current user is a special service account
-        if username == SERVICE_ACCOUNT_NAME:
-            print 'detected special service account %s, skipping account...', username
+        log.info('username %s', username)
+        email = get_owner_email(client, username)
+        if not email:
+            logging.info('Skipping: Email not found for user %s', username)
             continue
 
         access_keys = client.list_access_keys(UserName=username)['AccessKeyMetadata']
-        for access_key in access_keys:
-            print access_key
-            access_key_id = access_key['AccessKeyId']
+        if len(access_keys) == 1 and key_age(access_keys[0]['CreateDate']) == CREATE_NEW_ACCESS_KEY_AFTER:
+            log.info('Creating a new access key')
+            x = client.create_access_key(UserName=username)['AccessKey']
+            access_key, secret_access_key = x['AccessKeyId'], x['SecretAccessKey']
+            body = 'Access Key: ' + access_key + '\n' + 'Secret Key: ' + secret_access_key + '\n'
+            subject = 'New access keys created for user ' + username
+            notify(body, subject)
+        elif len(access_keys) == 2:
+            log.info('Screening existing access keys for user %s', username)
+            younger_access_key = access_keys[0]
+            younger_access_key_age = key_age(younger_access_key['CreateDate'])
 
-            masked_access_key_id = mask_access_key(access_key_id)
+            if not is_access_key_ever_used(client, younger_access_key['AccessKeyId']):
+                if younger_access_key_age in NEW_ACCESS_KEY_NOTIFY_WINDOW:
+                    old_key_expire_timeout = EXPIRE_OLD_ACCESS_KEY_AFTER - younger_access_key_age
+                    logging.info('User %s has %s days to use this new key %s', username, old_key_expire_timeout, younger_access_key['AccessKeyId'])
+                    body = 'You have ' + str(old_key_expire_timeout) + ' days to use the new access keys.'
+                    subject = 'Please use the new access keys for ' + username
+                    notify(body, subject)
 
-            print 'AccessKeyId %s' % masked_access_key_id
+            if younger_access_key_age == EXPIRE_OLD_ACCESS_KEY_AFTER:
+                logging.info('Deactivating old key %s for user %s', access_keys[1]['AccessKeyId'], username)
+                client.update_access_key(
+                    UserName=username,
+                    AccessKeyId=access_keys[1]['AccessKeyId'],
+                    Status='Inactive'
+                )
+            elif younger_access_key_age == DELETE_OLD_ACCESS_KEY_AFTER:
+                logging.info('Deleting old key %s for user %s', access_keys[1]['AccessKeyId'], username)
+                client.delete_access_key(
+                    UserName=username,
+                    AccessKeyId=access_keys[1]['AccessKeyId']
+                )
 
-            existing_key_status = access_key['Status']
-            print existing_key_status
+    log.info('Completed')
+    return 0
 
-            key_created_date = access_key['CreateDate']
-            print 'key_created_date %s' % key_created_date
 
-            age = key_age(key_created_date)
-            print 'age %s' % age
-
-            # we only need to examine the currently Active and about to expire keys
-            if existing_key_status == "Inactive":
-                key_state = 'key is already in an INACTIVE state'
-                key_info = {'accesskeyid': masked_access_key_id, 'age': age, 'state': key_state, 'changed': False}
-                user_keys.append(key_info)
-                continue
-
-            key_state = ''
-            key_state_changed = False
-            if age < FIRST_WARNING_NUM_DAYS:
-                key_state = KEY_YOUNG_MESSAGE
-            elif age == FIRST_WARNING_NUM_DAYS:
-                key_state = FIRST_WARNING_MESSAGE
-            elif age == LAST_WARNING_NUM_DAYS:
-                key_state = LAST_WARNING_MESSAGE
-            elif age >= KEY_MAX_AGE_IN_DAYS:
-                key_state = KEY_EXPIRED_MESSAGE
-                client.update_access_key(UserName=username, AccessKeyId=access_key_id, Status=KEY_STATE_INACTIVE)
-                send_deactivate_email(EMAIL_TO_ADMIN, username, age, masked_access_key_id)
-                key_state_changed = True
-
-            print 'key_state %s' % key_state
-
-            key_info = {'accesskeyid': masked_access_key_id, 'age': age, 'state': key_state, 'changed': key_state_changed}
-            user_keys.append(key_info)
-
-        user_info_with_username = {'userid': userindex, 'username': username, 'keys': user_keys}
-        user_info_without_username = {'userid': userindex, 'keys': user_keys}
-
-        users_report1.append(user_info_with_username)
-        users_report2.append(user_info_without_username)
-
-    finished = str(datetime.now())
-    deactivated_report1 = {'reportdate': finished, 'users': users_report1}
-    print 'deactivated_report1 %s ' % deactivated_report1
-
-    if EMAIL_SEND_COMPLETION_REPORT:
-        deactivated_report2 = {'reportdate': finished, 'users': users_report2}
-        send_completion_email(EMAIL_TO_ADMIN, finished, deactivated_report2)
-
-    print '*****************************'
-    print 'Completed (%s): %s' % (BUILD_VERSION, finished)
-    print '*****************************'
-    return deactivated_report1
-
-#if __name__ == "__main__":
+# if __name__ == "__main__":
 #    event = 1
 #    context = 1
 #    lambda_handler(event, context)
