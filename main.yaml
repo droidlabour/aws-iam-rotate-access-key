@@ -7,9 +7,6 @@ Parameters:
   LambdaS3Key:
     Description: S3 object name (in zip) for lambda package.
     Type: String
-  SNSTopicArn:
-    Description: SNS Topic ARN
-    Type: String
 
 Resources:
   ScheduledRule:
@@ -48,9 +45,6 @@ Resources:
         'Fn::GetAtt':
           - LambdaFunctionExecRole
           - Arn
-      Environment:
-        Variables:
-          SNS_TOPIC_ARN: !Ref SNSTopicArn
       Runtime: python2.7
       Timeout: 300
       MemorySize: 128
@@ -69,5 +63,5 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-        - arn:aws:iam::aws:policy/service-role/AWSIoTDeviceDefenderPublishFindingsToSNSMitigationAction
+        - arn:aws:iam::aws:policy/AmazonSESFullAccess
         - arn:aws:iam::aws:policy/IAMFullAccess

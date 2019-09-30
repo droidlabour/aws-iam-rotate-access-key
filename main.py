@@ -1,21 +1,33 @@
-import os
 import logging
 from datetime import datetime
 
 import boto3
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
 
-def notify(body, subject):
-    client = boto3.client('sns')
-    r = client.publish(
-        TopicArn=os.getenv('SNS_TOPIC_ARN'),
-        Message=body,
-        Subject=subject
+def notify(body, subject, email):
+    log.info('Notifying %s', email)
+    client = boto3.client('ses')
+    message = MIMEMultipart()
+    message['From'] = 'no-reply@annecolt.com'
+    message['To'] = email
+    message['Subject'] = subject
+    part = MIMEText(body, 'html')
+    message.attach(part)
+
+    r = client.send_raw_email(
+        Source=message['From'],
+        Destinations=[email],
+        RawMessage={
+            'Data': message.as_string()
+        }
     )
-    log.info('SNS notified with MessageId %s', r['MessageId'])
+
+    log.info('Email sent to %s response %s', email, r)
 
 
 def key_age(key_created_date):
@@ -68,13 +80,13 @@ def lambda_handler(event, context):
             continue
 
         access_keys = client.list_access_keys(UserName=username)['AccessKeyMetadata']
-        if len(access_keys) == 1 and key_age(access_keys[0]['CreateDate']) == CREATE_NEW_ACCESS_KEY_AFTER:
+        if len(access_keys) == 1 and key_age(access_keys[0]['CreateDate']) > CREATE_NEW_ACCESS_KEY_AFTER:
             log.info('Creating a new access key')
             x = client.create_access_key(UserName=username)['AccessKey']
             access_key, secret_access_key = x['AccessKeyId'], x['SecretAccessKey']
-            body = 'Access Key: ' + access_key + '\n' + 'Secret Key: ' + secret_access_key + '\n'
+            body = 'Access Key: ' + access_key + '<br/>' + 'Secret Key: ' + secret_access_key + '<br/>'
             subject = 'New access keys created for user ' + username
-            notify(body, subject)
+            notify(body, subject, email)
         elif len(access_keys) == 2:
             log.info('Screening existing access keys for user %s', username)
             younger_access_key = access_keys[0]
@@ -86,7 +98,7 @@ def lambda_handler(event, context):
                     logging.info('User %s has %s days to use this new key %s', username, old_key_expire_timeout, younger_access_key['AccessKeyId'])
                     body = 'You have ' + str(old_key_expire_timeout) + ' days to use the new access keys.'
                     subject = 'Please use the new access keys for ' + username
-                    notify(body, subject)
+                    notify(body, subject, email)
 
             if younger_access_key_age == EXPIRE_OLD_ACCESS_KEY_AFTER:
                 logging.info('Deactivating old key %s for user %s', access_keys[1]['AccessKeyId'], username)
