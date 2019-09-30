@@ -64,7 +64,7 @@ def lambda_handler(event, context):
     log.info('RotateAccessKey: starting...')
     EXPIRE_OLD_ACCESS_KEY_AFTER = 30
     DELETE_OLD_ACCESS_KEY_AFTER = 60
-    CREATE_NEW_ACCESS_KEY_AFTER = 90
+    CREATE_NEW_ACCESS_KEY_AFTER = 120
     NEW_ACCESS_KEY_NOTIFY_WINDOW = [14, 21]
     client = boto3.client('iam')
 
