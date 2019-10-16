@@ -24,7 +24,8 @@ def notify(body, subject, email):
         Destinations=[email],
         RawMessage={
             'Data': message.as_string()
-        }
+        },
+        ConfigurationSetName='ForceTLS'
     )
 
     log.info('Email sent to %s response %s', email, r)
