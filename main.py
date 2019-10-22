@@ -85,7 +85,7 @@ def lambda_handler(event, context):
             log.info('Creating a new access key')
             x = client.create_access_key(UserName=username)['AccessKey']
             access_key, secret_access_key = x['AccessKeyId'], x['SecretAccessKey']
-            body = 'Access Key: ' + access_key + '<br/>' + 'Secret Key: ' + secret_access_key + '<br/>'
+            body = 'Hi ' + username + ',<br/><br/>A new access key has been created for you.<br/>' + 'Access Key: ' + access_key + '<br/>' + 'Secret Key: ' + secret_access_key + '<br/><br/>Regards,<br/>AIA Helpdesk<br/>'
             subject = 'New access keys created for user ' + username
             notify(body, subject, email)
         elif len(access_keys) == 2:
@@ -97,7 +97,7 @@ def lambda_handler(event, context):
                 if younger_access_key_age in NEW_ACCESS_KEY_NOTIFY_WINDOW:
                     old_key_expire_timeout = EXPIRE_OLD_ACCESS_KEY_AFTER - younger_access_key_age
                     logging.info('User %s has %s days to use this new key %s', username, old_key_expire_timeout, younger_access_key['AccessKeyId'])
-                    body = 'You have ' + str(old_key_expire_timeout) + ' days to use the new access keys.'
+                    body = 'Hi ' + username + ',<br/><br/>' + 'You have ' + str(old_key_expire_timeout) + ' days to use the new access keys.' + '<br/><br/>Regards,<br/>AIA Helpdesk<br/>'
                     subject = 'Please use the new access keys for ' + username
                     notify(body, subject, email)
 
